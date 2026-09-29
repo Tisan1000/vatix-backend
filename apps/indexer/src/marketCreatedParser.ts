@@ -244,9 +244,12 @@ export function parseMarketCreatedEvents(
       continue;
     }
 
-    const dedupeKey = `${event.ledger}:${event.id}`;
+    // Idempotency guard: dedupe on the stable (ledger, eventIndex) identity
+    // before parsing so replayed/concurrent deliveries of the same
+    // MarketCreated event never produce duplicate market rows downstream.
+    const dedupeKey = `${event.ledger}:${event.eventIndex}`;
     if (seen.has(dedupeKey)) {
-      telemetry?.record("indexer.parser.replayed_event", 1, {
+      telemetry?.record("indexer.parser.duplicate_event", 1, {
         parser: "market_created",
         eventId: event.id,
         contractId: event.contractId,

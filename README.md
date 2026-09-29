@@ -57,6 +57,54 @@ Do not point a liveness probe at `/ready` (a dependency outage would restart a
 healthy process) and do not point a readiness probe at `/health` (traffic would
 be routed to a process that cannot serve it).
 
+## Prisma seed markers
+
+Seed data is applied through Prisma's seed entrypoint and is guarded by
+**seed markers**: idempotent, typed records that record which seed set has
+already been applied. Markers make seeding safe to re-run and safe to run
+concurrently, and they fail closed when the database is unavailable.
+
+### Marker contract
+
+Each marker is keyed by a stable `key` (the seed set identifier) and carries a
+`version` and an `appliedAt` timestamp. Re-applying a marker with the same
+`key` and `version` is a no-op; a higher `version` supersedes the previous one.
+
+```json
+{
+  "key": "core-reference-data",
+  "version": 3,
+  "appliedAt": "2024-01-01T00:00:00.000Z"
+}
+```
+
+Stable error codes:
+
+- `OK` — marker applied or already present at the requested version.
+- `SEED_MARKER_CONFLICT` — a concurrent writer applied a different version.
+- `DEPENDENCY_UNAVAILABLE` — the database was unreachable; the write failed
+  closed and no marker was recorded.
+- `SEED_MARKER_UNAUTHORIZED` — the caller is not permitted to write markers.
+
+### Idempotency & concurrency
+
+- Marker writes are idempotent: replaying the same seed set is a no-op.
+- Concurrent seed runs are serialized on the marker key; the loser of the race
+  observes `SEED_MARKER_CONFLICT` and must not re-apply data.
+- Every marker write carries a correlation id so a seed run can be traced end to
+  end without logging secrets.
+
+### Security
+
+- Writing seed markers is a privileged surface and is **deny-by-default**:
+  only the seed runner (or an explicitly authorized operator role) may write
+  markers. Untrusted clients cannot bypass this policy.
+- Seed markers are never written on mainnet without the readiness checklist;
+  the seed path is gated behind a feature flag/kill-switch so it can be
+  disabled without a redeploy.
+- Marker logs and metrics record only the marker `key`, `version`, and status —
+  never credentials or connection strings.
+
 ## Git hooks (Husky)
 
 The `.husky/` hooks run local quality gates (lint, format, tests) before a
@@ -90,6 +138,16 @@ pushing.
 Use `HUSKY=0 git commit ...` to skip hooks for a single commit, or
 `git commit --no-verify` as the standard Git escape hatch. Do not disable hooks
 in CI configuration — the CI-safe detection already handles that path.
+
+## Docker Compose
+
+See [`docs/docker-compose.md`](docs/docker-compose.md) for local orchestration
+and probe configuration.
+
+## Security
+
+See [`SECURITY.md`](SECURITY.md) for the deny-by-default policy, rate-limit
+governance, and probe safety invariants.
 
 ## Docker Compose
 
