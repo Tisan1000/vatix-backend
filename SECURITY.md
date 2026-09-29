@@ -10,6 +10,12 @@ Instead, report them responsibly by contacting security@vatix.io.
 - **Deny-by-default**: Every external entrypoint requires an authenticated
   principal unless explicitly marked as a probe. Unauthenticated requests
   to data or money-path routes fail closed with `401 UNAUTHORIZED`.
+- **Route inventory**: The authoritative OpenAPI/route inventory for the
+  `vatix-backend` API surface (method, path, authz requirement, request/
+  response shape, and stable error codes) lives in
+  [`apps/api/README.md`](apps/api/README.md). Every route is listed there;
+  routes absent from the inventory are denied by default and must not be
+  exposed. See [`apps/api/README.md`](apps/api/README.md).
 - **Provider allowlist**: Price feeds are deny-by-default when configured —
   `ORACLE_PRICE_PROVIDER_ALLOWLIST` admits only named providers, enforced at
   construction and before every fetch (`PRICE_PROVIDER_NOT_ALLOWED`, 403).

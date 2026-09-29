@@ -10,7 +10,8 @@
     "dev": "tsx watch routes/index.ts",
     "start": "tsx routes/index.ts",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "openapi:inventory": "tsx scripts/openapi-inventory.ts"
   },
   "keywords": [],
   "author": "",

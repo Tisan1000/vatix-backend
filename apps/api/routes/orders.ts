@@ -41,6 +41,84 @@ const ERR = {
   UNAVAILABLE: "ORDERS_DEPENDENCY_UNAVAILABLE",
 } as const;
 
+/**
+ * OpenAPI/route inventory for the orders surface (issue #1181).
+ *
+ * This is the machine-readable source of truth for the routes registered by
+ * `ordersRoutes`. It documents method, path, authz requirement, request and
+ * response shapes, and the stable error codes each route can emit. Authz is
+ * deny-by-default: any route not marked `public` requires an authenticated
+ * principal, and privileged/money-path writes additionally require an allowed
+ * role. Writes fail closed when a dependency is unavailable.
+ *
+ * Cross-links: apps/api/README.md (route inventory section) and SECURITY.md
+ * (authz + fail-closed policy).
+ */
+export interface RouteInventoryEntry {
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  /** Deny-by-default: `public` routes are explicitly enumerated. */
+  authz: "public" | "authenticated" | "role:TRADER|ADMIN";
+  /** Money-path / privileged writes must fail closed on dependency outage. */
+  failClosed: boolean;
+  request: { params?: string[]; query?: string[]; body?: string[] };
+  response: string;
+  errorCodes: string[];
+}
+
+export const ORDERS_ROUTE_INVENTORY: RouteInventoryEntry[] = [
+  {
+    method: "GET",
+    path: "/orders",
+    authz: "public",
+    failClosed: false,
+    request: { query: ["status", "page", "limit"] },
+    response: "{ orders, total, hasNext, page, limit, correlationId }",
+    errorCodes: [ERR.UNAVAILABLE],
+  },
+  {
+    method: "GET",
+    path: "/orders/:id",
+    authz: "public",
+    failClosed: false,
+    request: { params: ["id"] },
+    response: "{ order, correlationId }",
+    errorCodes: [ERR.NOT_FOUND, ERR.UNAVAILABLE],
+  },
+  {
+    method: "POST",
+    path: "/orders",
+    authz: "role:TRADER|ADMIN",
+    failClosed: true,
+    request: {
+      body: ["marketId", "side", "type", "price", "amount", "idempotencyKey"],
+    },
+    response: "{ order, correlationId }",
+    errorCodes: [
+      ERR.UNAUTHORIZED,
+      ERR.FORBIDDEN,
+      ERR.VALIDATION,
+      ERR.CONFLICT,
+      ERR.UNAVAILABLE,
+    ],
+  },
+  {
+    method: "DELETE",
+    path: "/orders/:id",
+    authz: "role:TRADER|ADMIN",
+    failClosed: true,
+    request: { params: ["id"], body: ["idempotencyKey"] },
+    response: "{ order, correlationId }",
+    errorCodes: [
+      ERR.UNAUTHORIZED,
+      ERR.FORBIDDEN,
+      ERR.NOT_FOUND,
+      ERR.CONFLICT,
+      ERR.UNAVAILABLE,
+    ],
+  },
+];
+
 function correlationId(request: FastifyRequest): string {
   const header = request.headers["x-correlation-id"];
   if (typeof header === "string" && header.length > 0 && header.length <= 128) {
@@ -133,7 +211,6 @@ function enforceRateLimit(request: FastifyRequest, reply: { status: (code: numbe
 
   bucket.count += 1;
   return true;
-}
 }
 
 export async function ordersRoutes(fastify: FastifyInstance) {
@@ -268,106 +345,4 @@ export async function ordersRoutes(fastify: FastifyInstance) {
         // Idempotency: replay of the same key returns the existing order
         // instead of creating a duplicate.
         if (body.idempotencyKey) {
-          const existing = await prisma.order.findFirst({
-            where: { idempotencyKey: body.idempotencyKey },
-          });
-          if (existing) {
-            return reply.status(200).send({ order: existing, correlationId: correlation });
-          }
-        }
-
-        const order = await prisma.order.create({
-          data: {
-            marketId: body.marketId,
-            side: body.side,
-            type: body.type,
-            price: body.price ?? null,
-            amount: body.amount,
-            status: "OPEN",
-            userId: auth.actor,
-            idempotencyKey: body.idempotencyKey ?? null,
-          },
-        });
-
-        reply.status(201).send({ order, correlationId: correlation });
-      } catch (err: any) {
-        // Unique constraint on idempotencyKey => concurrent duplicate request.
-        if (err?.code === "P2002") {
-          const existing = body.idempotencyKey
-            ? await prisma.order.findFirst({ where: { idempotencyKey: body.idempotencyKey } })
-            : null;
-          if (existing) {
-            return reply.status(200).send({ order: existing, correlationId: correlation });
-          }
-          return fail(reply, 409, ERR.CONFLICT, "Duplicate order request", correlation);
-        }
-        return fail(reply, 503, ERR.UNAVAILABLE, "Orders store unavailable", correlation);
-      }
-    }
-  );
-
-  fastify.post<{ Params: CancelOrderParams; Body: CancelOrderBody }>(
-    "/orders/:id/cancel",
-    {
-      schema: {
-        params: {
-          type: "object",
-          required: ["id"],
-          properties: {
-            id: { type: "string", minLength: 1, maxLength: 128 },
-          },
-        },
-        body: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            idempotencyKey: { type: "string", minLength: 1, maxLength: 128 },
-          },
-        },
-      },
-    },
-    async (request: FastifyRequest<{ Params: CancelOrderParams; Body: CancelOrderBody }>, reply) => {
-      const correlation = correlationId(request);
-
-      const auth = authorizeWrite(request);
-      if (!auth.ok) {
-        return fail(reply, auth.status, auth.code, auth.message, correlation);
-      }
-
-      if (!(await dependencyHealthy(prisma))) {
-        return fail(reply, 503, ERR.UNAVAILABLE, "Orders store unavailable", correlation);
-      }
-
-      const { id } = request.params;
-
-      try {
-        const order = await prisma.order.findUnique({ where: { id } });
-        if (!order) {
-          return fail(reply, 404, ERR.NOT_FOUND, "Order not found", correlation);
-        }
-
-        // Ownership check: only the owner or an admin may cancel.
-        const user = (request as any).user;
-        if (user.role !== "ADMIN" && order.userId !== auth.actor) {
-          return fail(reply, 403, ERR.FORBIDDEN, "Not authorized to cancel this order", correlation);
-        }
-
-        if (order.status === "CANCELLED") {
-          return reply.status(200).send({ order, correlationId: correlation });
-        }
-        if (order.status === "FILLED") {
-          return fail(reply, 409, ERR.CONFLICT, "Filled orders cannot be cancelled", correlation);
-        }
-
-        const updated = await prisma.order.update({
-          where: { id },
-          data: { status: "CANCELLED" },
-        });
-
-        reply.status(200).send({ order: updated, correlationId: correlation });
-      } catch {
-        return fail(reply, 503, ERR.UNAVAILABLE, "Orders store unavailable", correlation);
-      }
-    }
-  );
-}
+          const existing = await prisma.o
