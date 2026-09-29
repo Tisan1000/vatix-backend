@@ -14,6 +14,14 @@ Instead, report them responsibly by contacting security@vatix.io.
   `ORACLE_PRICE_PROVIDER_ALLOWLIST` admits only named providers, enforced at
   construction and before every fetch (`PRICE_PROVIDER_NOT_ALLOWED`, 403).
   See [`docs/price-provider-allowlist.md`](docs/price-provider-allowlist.md).
+- **Oracle credentials**: Oracle signing keys and provider API credentials are
+  loaded only from the environment (or a mounted secret store) and are never
+  committed, logged, or returned by any endpoint. Configuration is validated
+  fail-closed at startup: a missing, malformed, or placeholder credential
+  aborts boot with `ORACLE_CREDENTIAL_INVALID` rather than starting in a
+  degraded state. Credentials are redacted in structured logs and error
+  payloads, and privileged credential surfaces are deny-by-default. See
+  [`apps/oracle/oracle-config.ts`](apps/oracle/oracle-config.ts).
 - **Poison quarantine**: Submission-queue items that keep failing are
   quarantined after a bounded number of attempts and can never be replayed
   back into the money path (`SUBMISSION_QUEUE_POISON`, non-retryable); queue
