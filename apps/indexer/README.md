@@ -232,3 +232,68 @@ See `SECURITY.md` for the deny-by-default policy on privileged surfaces
 and the rate-limit/authorization requirements for every external
 entrypoint. New privileged surfaces must be authorized and rate-limited
 before landing.
+
+## Operations runbook
+
+Per-service entry point for operators. Deep-dive procedures live in the
+[incident runbook](../../docs/runbooks/incident-runbook.md), in particular
+[Incident 1: Indexer Lag or Stall](../../docs/runbooks/incident-runbook.md#incident-1-indexer-lag-or-stall)
+and [Incident 2: RPC/Horizon Outage](../../docs/runbooks/incident-runbook.md#incident-2-rpchorizon-outage).
+
+### Start and stop
+
+| How            | Command                                                            |
+| -------------- | ------------------------------------------------------------------ |
+| Host           | `pnpm indexer:start` (watch mode: `pnpm indexer:dev`)              |
+| Docker Compose | `docker compose --profile indexer up -d --build` (`vatix-indexer`) |
+| Docker image   | `docker build --target indexer -t vatix-indexer .`                 |
+
+`src/main.ts` validates the environment and, only when `INDEXER_HTTP_ENABLED=true`, runs the
+startup health gate and serves the read-only HTTP surface. The ingestion loop
+(`PollingIngestionLoop` in `src/ingestion.ts`) and its cursor semantics are described in
+[docs/indexer-ledger-cursor.md](../../docs/indexer-ledger-cursor.md).
+
+### Configuration
+
+| Env var                                         | Required    | Description                                                                 |
+| ----------------------------------------------- | ----------- | --------------------------------------------------------------------------- |
+| `SOROBAN_NETWORK_PASSPHRASE`                    | Yes         | Network passphrase; a mainnet passphrase also needs `VATIX_ALLOW_MAINNET`   |
+| `INDEXER_CONTRACT_ID` / `MARKET_CONTRACT_ID`    | Yes         | Contract whose events are indexed                                           |
+| `VATIX_ALLOW_MAINNET`                           | Mainnet     | Explicit mainnet opt-in (`true`)                                            |
+| `DATABASE_URL`                                  | Yes         | Postgres for cursors and read models                                        |
+| `INDEXER_HTTP_ENABLED`                          | No          | `true` to serve the HTTP surface (kill switch: unset it)                    |
+| `INDEXER_HTTP_PORT`                             | No          | HTTP port, default `3000`                                                   |
+| `INDEXER_API_KEY`, `INDEXER_REQUIRED_PRINCIPAL` | Recommended | HTTP authz; unset means the surface starts with a warning ([Authz](#authz)) |
+
+Ingestion tuning (`INDEXER_BATCH_SIZE`, `INDEXER_LEDGER_WINDOW_SIZE`, gap thresholds, …) is
+listed in [docs/indexer-ledger-cursor.md](../../docs/indexer-ledger-cursor.md).
+
+### Health and signals
+
+- Boot failures print only stable codes and variable names, never values:
+  `[env] <CODE> <VARIABLE>` or `[startup-health] <error>`, followed by
+  `refusing to boot` and exit code 1.
+- A successful HTTP boot logs `[boot] indexer HTTP server listening on port <port>`.
+- `GET /health` (liveness), `GET /ready` (readiness, `503` when not ready) and `GET /metrics`
+  (Prometheus) are exempt from rate limiting; probe the indexer on these, not on the API's.
+  `/metrics` is unauthenticated, so restrict it to the internal scraper at the network layer.
+
+### Common failures
+
+| Symptom                                                     | Likely cause                                   | Action                                                                                                                                                        |
+| ----------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[env] ENV_MISSING SOROBAN_NETWORK_PASSPHRASE`              | Passphrase not set                             | Set it for the target network ([docs/env-validation.md](../../docs/env-validation.md)).                                                                       |
+| `[env] ENV_UNSAFE_MAINNET VATIX_ALLOW_MAINNET`              | Mainnet passphrase without the opt-in          | Confirm mainnet is intended and signed off before setting `VATIX_ALLOW_MAINNET=true`.                                                                         |
+| `[env] ENV_MISSING INDEXER_CONTRACT_ID`                     | No contract configured                         | Set `INDEXER_CONTRACT_ID` (or `MARKET_CONTRACT_ID`) for the same network as the passphrase.                                                                   |
+| `[startup-health] refusing to boot: dependencies not ready` | Postgres unreachable at boot                   | Follow [Incident 3](../../docs/runbooks/incident-runbook.md#incident-3-database-incident).                                                                    |
+| `/markets` returns `401 UNAUTHORIZED`                       | Missing/incorrect `x-principal` or `x-api-key` | Check the caller's headers against the configured authz values.                                                                                               |
+| Indexed data lags or a gap is reported                      | RPC outage, stalled cursor or missing ledgers  | [Incident 1](../../docs/runbooks/incident-runbook.md#incident-1-indexer-lag-or-stall) and [docs/indexer-gap-backfill.md](../../docs/indexer-gap-backfill.md). |
+
+### Kill switches and rollback
+
+- Unset `INDEXER_HTTP_ENABLED` to take the HTTP surface down without a code change.
+- Indexed writes are idempotent (keyed on `ledgerSeq:eventIndex`), so re-indexing after a
+  rollback cannot double-apply events. To re-index a range, follow
+  [Cursor durability § Rollback](#rollback-1); never move the cursor forward past unindexed
+  ledgers.
+- Roll back a release by redeploying the previous image; no data migration is involved.
