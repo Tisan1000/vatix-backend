@@ -217,10 +217,10 @@ export class InternalIndexerMetricsService {
   }
 
   /**
-   * Increment the backfill-ledgers counter by the number of ledgers
-   * that were re-fetched during a gap catch-up.
+   * Increment the back-filled-ledgers counter by `count` (defaults to 1).
+   * Called once per ledger successfully back-filled.
    */
-  incrementBackfillLedgers(count: number): void {
+  incrementBackfillLedgers(count = 1): void {
     this.backfillLedgersTotal += count;
     backfillLedgersTotalCounter.inc(count);
   }
@@ -229,7 +229,10 @@ export class InternalIndexerMetricsService {
     return this.backfillLedgersTotal;
   }
 
-  /** Increment the parse-error counter by `count` (defaults to 1). */
+  /**
+   * Increment the parse-error counter by `count` (defaults to 1).
+   * Called once per event that fails to parse.
+   */
   incrementParseError(count = 1): void {
     this.parseErrorTotal += count;
     parseErrorTotalCounter.inc(count);
@@ -240,24 +243,27 @@ export class InternalIndexerMetricsService {
   }
 
   /**
-   * Increment the batch-rejected counter. Called by the batch writer's size /
-   * input guards before any database work happens (#1152). Counter-only — it
-   * is intentionally excluded from the JSON snapshot because it is a
-   * Prometheus-only alerting signal.
+   * Record a batch rejection before persistence, labelled by reason (#1152).
+   * The guard fails closed: the batch is dropped and the counter is bumped
+   * so operators can alert on a non-zero rate.
    */
-  incrementBatchRejected(reason: BatchRejectedReason, count = 1): void {
-    batchRejectedTotalCounter.inc({ reason }, count);
+  recordBatchRejected(reason: BatchRejectedReason): void {
+    batchRejectedTotalCounter.inc({ reason });
   }
 
   /**
-   * Record the terminal outcome of a gap back-fill run so operators can alert
-   * on stalled catch-up (#1151). Counter-only — see `incrementBatchRejected`.
+   * Record the terminal outcome of a ledger gap back-fill run (#1151).
+   * Operators alert on any non-`completed` outcome.
    */
-  incrementGapBackfillOutcome(outcome: GapBackfillOutcome, count = 1): void {
-    gapBackfillOutcomeTotalCounter.inc({ outcome }, count);
+  recordGapBackfillOutcome(outcome: GapBackfillOutcome): void {
+    gapBackfillOutcomeTotalCounter.inc({ outcome });
   }
 
-  getSnapshot(): IndexerMetricsSnapshot {
+  /**
+   * Snapshot the current in-memory counters and gauges.
+   * Used by the periodic metrics logger and the /metrics scrape endpoint.
+   */
+  snapshot(): IndexerMetricsSnapshot {
     return {
       latestIndexedLedgerSequence: this.latestIndexedLedgerSequence,
       latestNetworkLedgerSequence: this.latestNetworkLedgerSequence,
@@ -268,15 +274,24 @@ export class InternalIndexerMetricsService {
     };
   }
 
-  toLogFields(): IndexerMetricsLog {
+  /**
+   * Build the typed log payload for a metrics snapshot. The payload contains
+   * only numeric counters/gauges — never secrets, tokens, or credentials —
+   * so it is safe to emit at info level.
+   */
+  toLog(): IndexerMetricsLog {
+    const snap = this.snapshot();
     return {
       event: "indexer.metrics.snapshot",
-      latestIndexedLedgerSequence: this.latestIndexedLedgerSequence,
-      latestNetworkLedgerSequence: this.latestNetworkLedgerSequence,
-      lag: this.getLag(),
-      gapDetectedTotal: this.gapDetectedTotal,
-      backfillLedgersTotal: this.backfillLedgersTotal,
-      parseErrorTotal: this.parseErrorTotal,
+      latestIndexedLedgerSequence: snap.latestIndexedLedgerSequence,
+      latestNetworkLedgerSequence: snap.latestNetworkLedgerSequence,
+      lag: snap.lag,
+      gapDetectedTotal: snap.gapDetectedTotal,
+      backfillLedgersTotal: snap.backfillLedgersTotal,
+      parseErrorTotal: snap.parseErrorTotal,
     };
   }
 }
+
+/** Process-wide singleton used by the indexer runtime. */
+export const indexerMetrics = new InternalIndexerMetricsService();
