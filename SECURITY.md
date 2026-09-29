@@ -52,3 +52,53 @@ Instead, report them responsibly by contacting security@vatix.io.
   redeploy.
 - **Secret hygiene**: No secrets, passwords, or connection strings may be
   checked into the repository or emitted in structured logs.
+
+## Implementation Summary (archive/sync)
+
+The authoritative description of the archive/sync implementation — its
+invariants, entrypoints, error codes, and observability — lives in
+[`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md). That document is the
+source of truth for how the indexer archives and syncs chain state; this
+section records the security invariants that summary must uphold.
+
+### Invariants
+
+- **Server/contract is the source of truth**: Balances, swaps, and admin
+  state are authoritative on the server/contract. The indexer archive and
+  sync paths are derived views only and must never be treated as the
+  authority for money-path decisions.
+- **Deny-by-default authz**: Every archive/sync entrypoint requires an
+  authenticated principal with the correct role; unauthenticated or
+  wrong-role requests fail closed (`401 UNAUTHORIZED` / `403 FORBIDDEN`).
+- **Fail-closed writes**: If a critical dependency (database, Redis, RPC) is
+  unreachable, archive/sync writes are rejected immediately rather than
+  partially applied or served from stale state.
+- **Idempotency**: Concurrent or replayed archive/sync requests are
+  idempotent — replays must not double-apply state, and duplicate work is
+  deduplicated by a stable correlation id.
+
+### Observability
+
+- Archive/sync money paths emit metrics and structured logs with a stable
+  correlation id so operators can trace a request end to end.
+- Logs and metrics never include secrets, credentials, connection strings,
+  or raw provider payloads; identifiers are redacted or hashed.
+
+### Feature flags & rollback
+
+- Archive/sync changes that affect the money path or mainnet are gated behind
+  a feature flag or kill-switch (e.g. `INDEXER_GAP_BACKFILL_ENABLED`) so they
+  can be disabled without a redeploy.
+- Every such change documents its rollback strategy in the PR description;
+  disabling the flag restores the prior, known-good behavior.
+
+### Related docs
+
+- [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) — archive/sync
+  implementation summary (source of truth).
+- [`RATE_LIMIT_POLICY.md`](RATE_LIMIT_POLICY.md) — per-route rate-limit
+  policies.
+- [`apps/indexer/README.md`](apps/indexer/README.md) — indexer overview and
+  runbook entrypoints.
+- [`apps/indexer/src/INDEXER_CONFIG_VALIDATION_HARDENING.md`](apps/indexer/src/INDEXER_CONFIG_VALIDATION_HARDENING.md)
+  — indexer config validation hardening.
